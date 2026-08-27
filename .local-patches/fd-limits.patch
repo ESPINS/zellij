@@ -1,8 +1,8 @@
 diff --git a/zellij-server/src/lib.rs b/zellij-server/src/lib.rs
-index 44a30772..e96fa832 100644
+index 44a30772..801f41f1 100644
 --- a/zellij-server/src/lib.rs
 +++ b/zellij-server/src/lib.rs
-@@ -858,6 +858,63 @@ mod session_state_tests {
+@@ -858,6 +858,59 @@ mod session_state_tests {
      }
  }
  
@@ -18,7 +18,7 @@ index 44a30772..e96fa832 100644
 +/// See https://github.com/zellij-org/zellij/issues/5314
 +#[cfg(unix)]
 +fn raise_nofile_limit() {
-+    const DESIRED_NOFILE: libc::rlim_t = 65536;
++    const DESIRED_NOFILE: libc::rlim_t = 16384;
 +
 +    let mut limit = unsafe { std::mem::zeroed::<libc::rlimit>() };
 +    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
@@ -29,11 +29,7 @@ index 44a30772..e96fa832 100644
 +        return;
 +    }
 +
-+    let ceiling = if limit.rlim_max == libc::RLIM_INFINITY {
-+        DESIRED_NOFILE
-+    } else {
-+        std::cmp::min(DESIRED_NOFILE, limit.rlim_max)
-+    };
++    let ceiling = std::cmp::min(DESIRED_NOFILE, limit.rlim_max);
 +    if limit.rlim_cur >= ceiling {
 +        return;
 +    }
@@ -66,7 +62,7 @@ index 44a30772..e96fa832 100644
  pub fn start_server(os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
      info!("Starting Zellij server!");
  
-@@ -896,6 +953,9 @@ pub fn start_server_impl(
+@@ -896,6 +949,9 @@ pub fn start_server_impl(
      socket_path: PathBuf,
      install_panic_hook: bool,
  ) {
@@ -77,48 +73,32 @@ index 44a30772..e96fa832 100644
  
      let (to_server, server_receiver): ChannelWithContext<ServerInstruction> = channels::bounded(50);
 diff --git a/zellij-server/src/os_input_output_unix.rs b/zellij-server/src/os_input_output_unix.rs
-index bfebd7b5..c2f6a9cb 100644
+index bfebd7b5..eb385a50 100644
 --- a/zellij-server/src/os_input_output_unix.rs
 +++ b/zellij-server/src/os_input_output_unix.rs
-@@ -201,6 +201,10 @@ fn handle_openpty(
-     let pid_secondary = open_pty_res.slave.into_raw_fd();
+@@ -196,10 +196,10 @@ fn handle_openpty(
+         )
+     };
  
+-    // primary side of pty and child fd
+-    let pid_primary = open_pty_res.master.into_raw_fd();
+-    let pid_secondary = open_pty_res.slave.into_raw_fd();
+-
++    // NOTE: check the command before taking the fds out of their OwnedFd
++    // wrappers. Returning first lets Drop close the pty pair; taking them first
++    // leaked two descriptors for every pane opened with a command that does not
++    // exist.
      if !command_exists(&cmd) {
-+        // we took ownership of both pty fds above; without this they would leak
-+        // for every pane that is opened with a command that does not exist
-+        let _ = unistd::close(pid_primary);
-+        let _ = unistd::close(pid_secondary);
          return Err(ZellijError::CommandNotFound {
              terminal_id,
-             command: cmd.command.to_string_lossy().to_string(),
-@@ -208,7 +212,7 @@ fn handle_openpty(
+@@ -208,6 +208,10 @@ fn handle_openpty(
          .with_context(|| err_context(&cmd));
      }
  
--    let mut child = unsafe {
-+    let spawn_result = unsafe {
++    // primary side of pty and child fd
++    let pid_primary = open_pty_res.master.into_raw_fd();
++    let pid_secondary = open_pty_res.slave.into_raw_fd();
++
+     let mut child = unsafe {
          let cmd = cmd.clone();
          let command = &mut Command::new(cmd.command);
-         if let Some(current_dir) = cmd.cwd {
-@@ -232,7 +236,20 @@ fn handle_openpty(
-                 Ok(())
-             })
-             .spawn()
--            .expect("failed to spawn")
-+    };
-+
-+    // Spawning can fail for reasons outside our control - most commonly EMFILE,
-+    // once the process has run out of file descriptors. Propagate the error so
-+    // that this one pane fails on its own, instead of panicking the server and
-+    // taking every other pane in the session down with it.
-+    let mut child = match spawn_result {
-+        Ok(child) => child,
-+        Err(e) => {
-+            // we took ownership of both pty fds above, so release them here
-+            let _ = unistd::close(pid_primary);
-+            let _ = unistd::close(pid_secondary);
-+            return Err(anyhow!("failed to spawn: {}", e)).with_context(|| err_context(&cmd));
-+        },
-     };
- 
-     let child_id = child.id();

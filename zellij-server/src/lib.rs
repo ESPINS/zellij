@@ -870,7 +870,7 @@ mod session_state_tests {
 /// See https://github.com/zellij-org/zellij/issues/5314
 #[cfg(unix)]
 fn raise_nofile_limit() {
-    const DESIRED_NOFILE: libc::rlim_t = 65536;
+    const DESIRED_NOFILE: libc::rlim_t = 16384;
 
     let mut limit = unsafe { std::mem::zeroed::<libc::rlimit>() };
     if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
@@ -881,11 +881,7 @@ fn raise_nofile_limit() {
         return;
     }
 
-    let ceiling = if limit.rlim_max == libc::RLIM_INFINITY {
-        DESIRED_NOFILE
-    } else {
-        std::cmp::min(DESIRED_NOFILE, limit.rlim_max)
-    };
+    let ceiling = std::cmp::min(DESIRED_NOFILE, limit.rlim_max);
     if limit.rlim_cur >= ceiling {
         return;
     }

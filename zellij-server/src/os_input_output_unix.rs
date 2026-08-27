@@ -196,15 +196,11 @@ fn handle_openpty(
         )
     };
 
-    // primary side of pty and child fd
-    let pid_primary = open_pty_res.master.into_raw_fd();
-    let pid_secondary = open_pty_res.slave.into_raw_fd();
-
+    // NOTE: check the command before taking the fds out of their OwnedFd
+    // wrappers. Returning first lets Drop close the pty pair; taking them first
+    // leaked two descriptors for every pane opened with a command that does not
+    // exist.
     if !command_exists(&cmd) {
-        // we took ownership of both pty fds above; without this they would leak
-        // for every pane that is opened with a command that does not exist
-        let _ = unistd::close(pid_primary);
-        let _ = unistd::close(pid_secondary);
         return Err(ZellijError::CommandNotFound {
             terminal_id,
             command: cmd.command.to_string_lossy().to_string(),
@@ -212,7 +208,11 @@ fn handle_openpty(
         .with_context(|| err_context(&cmd));
     }
 
-    let spawn_result = unsafe {
+    // primary side of pty and child fd
+    let pid_primary = open_pty_res.master.into_raw_fd();
+    let pid_secondary = open_pty_res.slave.into_raw_fd();
+
+    let mut child = unsafe {
         let cmd = cmd.clone();
         let command = &mut Command::new(cmd.command);
         if let Some(current_dir) = cmd.cwd {
@@ -236,20 +236,7 @@ fn handle_openpty(
                 Ok(())
             })
             .spawn()
-    };
-
-    // Spawning can fail for reasons outside our control - most commonly EMFILE,
-    // once the process has run out of file descriptors. Propagate the error so
-    // that this one pane fails on its own, instead of panicking the server and
-    // taking every other pane in the session down with it.
-    let mut child = match spawn_result {
-        Ok(child) => child,
-        Err(e) => {
-            // we took ownership of both pty fds above, so release them here
-            let _ = unistd::close(pid_primary);
-            let _ = unistd::close(pid_secondary);
-            return Err(anyhow!("failed to spawn: {}", e)).with_context(|| err_context(&cmd));
-        },
+            .expect("failed to spawn")
     };
 
     let child_id = child.id();
