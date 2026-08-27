@@ -858,6 +858,63 @@ mod session_state_tests {
     }
 }
 
+/// Raise this process's `RLIMIT_NOFILE` soft limit.
+///
+/// Zellij's file descriptor usage grows with every pane and every plugin
+/// instance: each WASI plugin instance preopens several directories, so a
+/// session with a dozen tabs can hold hundreds of descriptors. macOS hands
+/// daemons a soft limit of 256 while leaving the hard limit unlimited, so the
+/// server runs out of descriptors after roughly ten tabs and dies, taking the
+/// whole session with it.
+///
+/// See https://github.com/zellij-org/zellij/issues/5314
+#[cfg(unix)]
+fn raise_nofile_limit() {
+    const DESIRED_NOFILE: libc::rlim_t = 65536;
+
+    let mut limit = unsafe { std::mem::zeroed::<libc::rlimit>() };
+    if unsafe { libc::getrlimit(libc::RLIMIT_NOFILE, &mut limit) } != 0 {
+        log::warn!(
+            "could not read RLIMIT_NOFILE: {}",
+            std::io::Error::last_os_error()
+        );
+        return;
+    }
+
+    let ceiling = if limit.rlim_max == libc::RLIM_INFINITY {
+        DESIRED_NOFILE
+    } else {
+        std::cmp::min(DESIRED_NOFILE, limit.rlim_max)
+    };
+    if limit.rlim_cur >= ceiling {
+        return;
+    }
+
+    // Some platforms (macOS in particular) reject anything above a system wide
+    // per-process cap with EINVAL, so back off rather than give up entirely.
+    let mut candidate = ceiling;
+    while candidate > limit.rlim_cur {
+        let new_limit = libc::rlimit {
+            rlim_cur: candidate,
+            rlim_max: limit.rlim_max,
+        };
+        if unsafe { libc::setrlimit(libc::RLIMIT_NOFILE, &new_limit) } == 0 {
+            info!(
+                "raised RLIMIT_NOFILE soft limit from {} to {}",
+                limit.rlim_cur, candidate
+            );
+            return;
+        }
+        candidate /= 2;
+    }
+
+    log::warn!(
+        "could not raise RLIMIT_NOFILE above {}: {}; opening many tabs may fail",
+        limit.rlim_cur,
+        std::io::Error::last_os_error()
+    );
+}
+
 pub fn start_server(os_input: Box<dyn ServerOsApi>, socket_path: PathBuf) {
     info!("Starting Zellij server!");
 
@@ -896,6 +953,9 @@ pub fn start_server_impl(
     socket_path: PathBuf,
     install_panic_hook: bool,
 ) {
+    #[cfg(unix)]
+    raise_nofile_limit();
+
     envs::set_zellij("0".to_string());
 
     let (to_server, server_receiver): ChannelWithContext<ServerInstruction> = channels::bounded(50);
