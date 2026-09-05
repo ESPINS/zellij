@@ -17464,6 +17464,115 @@ fn drain_pty_writer(
     out
 }
 
+// Regression test for the non-mirrored multi-client "dropped input" bug:
+//
+// In a session with several clients, a client can end up connected to a tab yet have NO entry
+// in `tiled_panes.active_panes` (paneless) — e.g. `Tab::add_client` inserts a client into
+// `connected_clients` unconditionally but only focuses a pane when `first_active_pane_id()` is
+// `Some`, and no relayout runs `reapply_pane_focus` afterwards to repair it. When such a client
+// typed a plain character, `write_to_active_terminal` used to return `Err` (no active pane id),
+// which the `WriteCharacter` handler silently swallowed (`if let Ok(true) = write_result`), so the
+// keystroke never reached any pane — while client-level keybindings kept working.
+//
+// The fix makes `write_to_active_terminal` recover by adopting the tab's first selectable pane
+// (the same pane `reapply_pane_focus` would assign), so the Write reaches a real pane and the
+// client gains an active pane for subsequent input. This test forces the exact paneless state and
+// proves the keystroke is delivered instead of dropped.
+#[test]
+pub fn write_to_active_terminal_recovers_when_client_has_no_active_pane() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, true);
+    let rx = install_pty_writer_capture(&mut tab);
+
+    // A second client, connected to the tab but deliberately left without an active pane. This
+    // reproduces the bug state directly (the point is "connected but paneless", not to re-drive
+    // the natural add_client trigger): we register it in connected_clients and never assign it a
+    // pane in tiled_panes.active_panes.
+    let paneless_client: ClientId = 2;
+    tab.connected_clients
+        .borrow_mut()
+        .insert(paneless_client);
+
+    // Precondition: the client has no active pane, yet the tab DOES have a selectable tiled pane.
+    // (create_new_tab applies the default layout with a single terminal pane, id 1.)
+    assert!(
+        tab.tiled_panes.get_active_pane_id(paneless_client).is_none(),
+        "precondition: paneless client must have no active pane"
+    );
+    let expected_pane = tab
+        .tiled_panes
+        .first_selectable_pane_id()
+        .expect("precondition: tab must have a selectable tiled pane to recover onto");
+    let expected_terminal_id = match expected_pane {
+        PaneId::Terminal(id) => id,
+        other => panic!("expected a terminal pane, got {other:?}"),
+    };
+
+    // Type a plain character as the paneless client.
+    let result =
+        tab.write_to_active_terminal(&None, b"z".to_vec(), false, paneless_client);
+
+    // 1) Input is NOT dropped: the call succeeds instead of returning Err.
+    assert!(
+        result.is_ok(),
+        "write_to_active_terminal must not return Err for a paneless client (input would be \
+         silently dropped by the WriteCharacter handler); got {result:?}"
+    );
+
+    // 2) The byte reached the tab's first selectable pane's terminal.
+    let writes = drain_pty_writer(&rx);
+    let delivered = writes.iter().any(|w| match w {
+        PtyWriteInstruction::Write(bytes, terminal_id, _) => {
+            *terminal_id == expected_terminal_id && bytes.as_slice() == b"z"
+        },
+        _ => false,
+    });
+    assert!(
+        delivered,
+        "expected 'z' to be written to terminal {expected_terminal_id}, got writes: {writes:?}"
+    );
+
+    // 3) The client now has an active pane, so subsequent input keeps working.
+    assert_eq!(
+        tab.get_active_pane_id(paneless_client),
+        Some(expected_pane),
+        "paneless client should have adopted the first selectable pane as its active pane"
+    );
+}
+
+// Documents the pre-fix drop condition as a static witness: for a paneless client the *old* code
+// path evaluated `tiled_panes.get_active_pane_id(client)` (None) and turned it into an Err via
+// `.with_context(..)?`, dropping the keystroke — even though a selectable pane was available to
+// recover onto. This encodes exactly the state the fix now handles.
+#[test]
+pub fn paneless_client_precondition_would_drop_without_fix() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let tab = create_new_tab(size, true);
+    let paneless_client: ClientId = 2;
+    tab.connected_clients
+        .borrow_mut()
+        .insert(paneless_client);
+
+    // Pre-fix, the non-floating branch was:
+    //     self.tiled_panes.get_active_pane_id(client_id).with_context(err_context)?
+    // i.e. a `None` here => `Err` => silently swallowed keystroke.
+    assert!(
+        tab.tiled_panes.get_active_pane_id(paneless_client).is_none(),
+        "the paneless client has no active pane -> old code would produce Err and drop input"
+    );
+    // ...while a valid recovery target existed all along:
+    assert!(
+        tab.tiled_panes.first_selectable_pane_id().is_some(),
+        "a selectable pane was available to recover onto (what the fix now uses)"
+    );
+}
+
 #[test]
 pub fn scroll_terminal_up_forwards_sgr_when_pane_tracks_mouse() {
     let size = Size {

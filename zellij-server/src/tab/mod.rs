@@ -4350,6 +4350,9 @@ impl Tab {
             self.floating_panes
                 .get_active_pane_id(client_id)
                 .or_else(|| self.tiled_panes.get_active_pane_id(client_id))
+                // A client can be connected to this tab yet have no active pane (see the
+                // else-branch comment below); recover instead of dropping its input.
+                .or_else(|| self.tiled_panes.first_selectable_pane_id())
                 .ok_or_else(|| {
                     anyhow!(format!(
                         "failed to find active pane id for client {client_id}"
@@ -4357,9 +4360,29 @@ impl Tab {
                 })
                 .with_context(err_context)?
         } else {
-            self.tiled_panes
-                .get_active_pane_id(client_id)
-                .with_context(err_context)?
+            match self.tiled_panes.get_active_pane_id(client_id) {
+                Some(pane_id) => pane_id,
+                None => {
+                    // BUG RECOVERY (non-mirrored multi-client): Tab::add_client inserts a
+                    // client into connected_clients unconditionally but only focuses a pane
+                    // when first_active_pane_id() is Some. If it is None the client is left
+                    // connected-but-paneless, and without a relayout reapply_pane_focus never
+                    // repairs it, so this Write would return Err and be silently dropped by the
+                    // WriteCharacter handler (`if let Ok(true) = write_result`). Recover with the
+                    // tab's first selectable pane (same as reapply_pane_focus) and adopt it so
+                    // subsequent input keeps working.
+                    let fallback = self
+                        .tiled_panes
+                        .first_selectable_pane_id()
+                        .with_context(err_context)?;
+                    log::error!(
+                        "client {client_id} had no active pane on its tab; input would have \
+                         been dropped — recovering with first selectable pane {fallback:?}"
+                    );
+                    self.tiled_panes.focus_pane(fallback, client_id);
+                    fallback
+                },
+            }
         };
         // Can't use 'err_context' here since it borrows 'raw_input_bytes'
         self.write_to_pane_id(
