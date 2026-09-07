@@ -4368,16 +4368,24 @@ impl Tab {
                     // when first_active_pane_id() is Some. If it is None the client is left
                     // connected-but-paneless, and without a relayout reapply_pane_focus never
                     // repairs it, so this Write would return Err and be silently dropped by the
-                    // WriteCharacter handler (`if let Ok(true) = write_result`). Recover with the
-                    // tab's first selectable pane (same as reapply_pane_focus) and adopt it so
-                    // subsequent input keeps working.
+                    // WriteCharacter handler (`if let Ok(true) = write_result`). Recover onto
+                    // focus_pane_id (the tab's last layout-focused pane — the same target
+                    // add_client itself prefers) when it still exists and is selectable, otherwise
+                    // the first selectable pane (same as reapply_pane_focus), and adopt it so
+                    // subsequent input keeps working. (focus_pane_id is set by LayoutApplier and
+                    // cleared on client removal; when absent this is exactly the base behavior.)
                     let fallback = self
-                        .tiled_panes
-                        .first_selectable_pane_id()
+                        .focus_pane_id
+                        .filter(|pane_id| {
+                            self.tiled_panes
+                                .get_pane(*pane_id)
+                                .map_or(false, |pane| pane.selectable())
+                        })
+                        .or_else(|| self.tiled_panes.first_selectable_pane_id())
                         .with_context(err_context)?;
                     log::error!(
                         "client {client_id} had no active pane on its tab; input would have \
-                         been dropped — recovering with first selectable pane {fallback:?}"
+                         been dropped — recovering onto pane {fallback:?}"
                     );
                     self.tiled_panes.focus_pane(fallback, client_id);
                     fallback

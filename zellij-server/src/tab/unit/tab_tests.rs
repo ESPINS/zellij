@@ -17573,6 +17573,73 @@ pub fn paneless_client_precondition_would_drop_without_fix() {
     );
 }
 
+// The paneless recovery prefers the tab's focus_pane_id (its last layout-focused pane, the target
+// add_client also prefers) when it still exists and is selectable, rather than blindly taking the
+// first selectable pane. Here focus_pane_id points at pane 2 while the first selectable pane is
+// pane 1; recovery must choose pane 2, and fall back to first-selectable only when focus_pane_id is
+// absent or stale (covered by the other recovery test, whose focus_pane_id is None).
+#[test]
+pub fn paneless_recovery_prefers_last_focused_pane() {
+    let size = Size {
+        cols: 121,
+        rows: 20,
+    };
+    let mut tab = create_new_tab(size, true);
+
+    // Give the tab a second selectable pane (id 2) in addition to the default pane (id 1).
+    tab.vertical_split(PaneId::Terminal(2), None, 1, None, None)
+        .unwrap();
+    // Last-focused pane is pane 2, while the first selectable pane is pane 1 (so the two recovery
+    // targets are distinguishable).
+    tab.focus_pane_id = Some(PaneId::Terminal(2));
+    assert_eq!(
+        tab.tiled_panes.first_selectable_pane_id(),
+        Some(PaneId::Terminal(1)),
+        "precondition: first selectable pane must be pane 1, distinct from focus_pane_id (pane 2)"
+    );
+
+    let rx = install_pty_writer_capture(&mut tab);
+
+    // A second client, connected to the tab but deliberately left without an active pane.
+    let paneless_client: ClientId = 2;
+    tab.connected_clients
+        .borrow_mut()
+        .insert(paneless_client);
+    assert!(
+        tab.tiled_panes.get_active_pane_id(paneless_client).is_none(),
+        "precondition: paneless client must have no active pane"
+    );
+
+    let result =
+        tab.write_to_active_terminal(&None, b"z".to_vec(), false, paneless_client);
+    assert!(
+        result.is_ok(),
+        "recovery must not drop input for a paneless client; got {result:?}"
+    );
+
+    // The byte reached pane 2 (the last-focused pane), NOT pane 1 (the first selectable pane).
+    let writes = drain_pty_writer(&rx);
+    let delivered_to = |target: u32| {
+        writes.iter().any(|w| match w {
+            PtyWriteInstruction::Write(bytes, terminal_id, _) => {
+                *terminal_id == target && bytes.as_slice() == b"z"
+            },
+            _ => false,
+        })
+    };
+    assert!(
+        delivered_to(2) && !delivered_to(1),
+        "expected 'z' delivered to last-focused pane 2, not first-selectable pane 1; writes: {writes:?}"
+    );
+
+    // The client adopted the last-focused pane as its active pane.
+    assert_eq!(
+        tab.get_active_pane_id(paneless_client),
+        Some(PaneId::Terminal(2)),
+        "paneless client should have adopted the last-focused pane (pane 2)"
+    );
+}
+
 #[test]
 pub fn scroll_terminal_up_forwards_sgr_when_pane_tracks_mouse() {
     let size = Size {
