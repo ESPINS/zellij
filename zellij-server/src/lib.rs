@@ -1437,22 +1437,19 @@ pub fn start_server_impl(
                     // Handle regular client removal
                     remove_client!(client_id, os_input, session_state, session_data);
                     drop(completion_tx); // prevent deadlock with route thread
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_screen(ScreenInstruction::RemoveClient(client_id))
-                        .unwrap();
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_plugin(PluginInstruction::RemoveClient(client_id))
-                        .unwrap();
+                    // The session may already have been torn down (session_data == None)
+                    // by the time this runs — e.g. a RemoveClient/ClientExit racing the
+                    // last client's disconnect, or a client attach/detach on a server
+                    // started without a controlling terminal. Skip rather than unwrap-panic
+                    // (which kills the server and loses every session).
+                    if let Some(session_data) = session_data.write().unwrap().as_ref() {
+                        let _ = session_data
+                            .senders
+                            .send_to_screen(ScreenInstruction::RemoveClient(client_id));
+                        let _ = session_data
+                            .senders
+                            .send_to_plugin(PluginInstruction::RemoveClient(client_id));
+                    }
                     if !session_state.read().unwrap().active_clients_are_connected() {
                         *session_data.write().unwrap() = None;
                         let client_ids_to_cleanup: Vec<ClientId> = session_state
@@ -1503,22 +1500,18 @@ pub fn start_server_impl(
                     }
                     // Handle regular client removal
                     remove_client!(client_id, os_input, session_state, session_data);
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_screen(ScreenInstruction::RemoveClient(client_id))
-                        .unwrap();
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_plugin(PluginInstruction::RemoveClient(client_id))
-                        .unwrap();
+                    // The session may already be torn down (session_data == None) when a
+                    // RemoveClient races the last client's ClientExit, or on a server
+                    // started without a controlling terminal (headless). Skip rather than
+                    // unwrap-panic, which would kill the server and every session with it.
+                    if let Some(session_data) = session_data.write().unwrap().as_ref() {
+                        let _ = session_data
+                            .senders
+                            .send_to_screen(ScreenInstruction::RemoveClient(client_id));
+                        let _ = session_data
+                            .senders
+                            .send_to_plugin(PluginInstruction::RemoveClient(client_id));
+                    }
                 }
             },
             ServerInstruction::SendWebClientsForbidden(client_id) => {
@@ -1583,22 +1576,17 @@ pub fn start_server_impl(
                                      // by us having to wait for session_data to send cleanup
                                      // signals to the various threads
                 for client_id in client_ids {
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_screen(ScreenInstruction::RemoveClient(client_id))
-                        .unwrap();
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_plugin(PluginInstruction::RemoveClient(client_id))
-                        .unwrap();
+                    // Session may already be torn down (session_data == None) — e.g. detaching
+                    // the last client, or a server started without a controlling terminal.
+                    // Skip rather than unwrap-panic (which kills the server and all sessions).
+                    if let Some(session_data) = session_data.write().unwrap().as_ref() {
+                        let _ = session_data
+                            .senders
+                            .send_to_screen(ScreenInstruction::RemoveClient(client_id));
+                        let _ = session_data
+                            .senders
+                            .send_to_plugin(PluginInstruction::RemoveClient(client_id));
+                    }
                 }
             },
             ServerInstruction::Render(serialized_output) => {
@@ -1727,22 +1715,18 @@ pub fn start_server_impl(
                     remove_client!(client_id, os_input, session_state, session_data);
                     drop(completion_tx); // do not deadlock with route thread
 
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_screen(ScreenInstruction::RemoveClient(client_id))
-                        .unwrap();
-                    session_data
-                        .write()
-                        .unwrap()
-                        .as_ref()
-                        .unwrap()
-                        .senders
-                        .send_to_plugin(PluginInstruction::RemoveClient(client_id))
-                        .unwrap();
+                    // Session may already be torn down (session_data == None) when the
+                    // departing client was the last one, or on a server started without a
+                    // controlling terminal. Skip rather than unwrap-panic (which kills the
+                    // server and every session with it).
+                    if let Some(session_data) = session_data.write().unwrap().as_ref() {
+                        let _ = session_data
+                            .senders
+                            .send_to_screen(ScreenInstruction::RemoveClient(client_id));
+                        let _ = session_data
+                            .senders
+                            .send_to_plugin(PluginInstruction::RemoveClient(client_id));
+                    }
                 }
             },
             ServerInstruction::AssociatePipeWithClient { pipe_id, client_id } => {
